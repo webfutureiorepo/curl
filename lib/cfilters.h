@@ -85,10 +85,10 @@ struct easy_pollset;
  * the pollset. Filters, whose filter "below" is not connected, should
  * also do no adjustments.
  *
- * Examples: a TLS handshake, while ongoing, might remove POLL_IN
- * when it needs to write, or vice versa. A HTTP/2 filter might remove
- * POLL_OUT when a stream window is exhausted and a WINDOW_UPDATE needs
- * to be received first and add instead POLL_IN.
+ * Examples: a TLS handshake, while ongoing, might remove POLL_IN when it
+ * needs to write, or vice versa. An HTTP/2 filter might remove POLL_OUT when
+ * a stream window is exhausted and a WINDOW_UPDATE needs to be received first
+ * and add instead POLL_IN.
  *
  * @param cf     the filter to ask
  * @param data   the easy handle the pollset is about
@@ -223,6 +223,7 @@ struct Curl_cfilter {
   struct connectdata *conn;      /* the connection this filter belongs to */
   int sockindex;                 /* the index the filter is installed at */
   BIT(connected);                /* != 0 iff this filter is connected */
+  BIT(shutdown);                 /* != 0 iff this filter has shut down */
 };
 
 /* Default implementations for the type functions, implementing nop. */

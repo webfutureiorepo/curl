@@ -6,14 +6,15 @@ Section: 3
 Source: libcurl
 See-also:
   - curl_easy_unescape (3)
-  - curl_free (3)
+  - curl_url_set (3)
+  - curl_url_get (3)
 Protocol:
   - All
 ---
 
 # NAME
 
-curl_easy_escape - URL encodes the given string
+curl_easy_escape - URL encode a string
 
 # SYNOPSIS
 
@@ -50,6 +51,17 @@ uses.
 
 The caller of curl_easy_escape(3) must make sure that the data passed in
 to the function is encoded correctly.
+
+# URLs
+
+URLs are by definition *URL encoded*. To create a proper URL from a set of
+components that may not be URL encoded already, you cannot just URL encode the
+entire URL string with curl_easy_escape(3), because it then also converts
+colons, slashes and other symbols that you probably want untouched.
+
+To create a proper URL from strings that are not already URL encoded, we
+recommend using libcurl's URL API: set the pieces with curl_url_set(3) and get
+the final correct URL with curl_url_get(3).
 
 # EXAMPLE
 

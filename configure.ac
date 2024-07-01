@@ -3189,7 +3189,7 @@ if test "x$want_openssl_quic" = "xyes"; then
     AC_MSG_ERROR([--with-openssl-quic and --with-ngtcp2 are mutually exclusive])
   fi
   if test "$HAVE_OPENSSL_QUIC" != 1; then
-    AC_MSG_ERROR([--with-openssl-quic requires quic support in OpenSSL])
+    AC_MSG_ERROR([--with-openssl-quic requires quic support and OpenSSL >= 3.3.0])
   fi
   AC_DEFINE(USE_OPENSSL_QUIC, 1, [if openssl QUIC is in use])
   AC_SUBST(USE_OPENSSL_QUIC, [1])
@@ -3491,7 +3491,8 @@ if test X"$want_msh3" != Xno; then
         AC_SUBST(USE_MSH3, [1])
         CURL_LIBRARY_PATH="$CURL_LIBRARY_PATH:$DIR_MSH3"
         export CURL_LIBRARY_PATH
-        AC_MSG_NOTICE([Added $DIR_MSH3 to CURL_LIBRARY_PATH]),
+        AC_MSG_NOTICE([Added $DIR_MSH3 to CURL_LIBRARY_PATH])
+        LIBCURL_PC_REQUIRES_PRIVATE="$LIBCURL_PC_REQUIRES_PRIVATE libmsh3"
         experimental="$experimental HTTP3"
      )
     ],

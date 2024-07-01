@@ -21,7 +21,7 @@
  * SPDX-License-Identifier: curl
  *
  ***************************************************************************/
-/* lib/curl_config.h.in.  Generated somehow by cmake.  */
+/* lib/curl_config.h.in. Generated somehow by cmake.  */
 
 /* Location of default ca bundle */
 #cmakedefine CURL_CA_BUNDLE "${CURL_CA_BUNDLE}"
@@ -698,8 +698,14 @@ ${SIZEOF_TIME_T_CODE}
 /* if BearSSL is enabled */
 #cmakedefine USE_BEARSSL 1
 
-/* if WolfSSL is enabled */
+/* if wolfSSL is enabled */
 #cmakedefine USE_WOLFSSL 1
+
+/* if wolfSSL has the wolfSSL_DES_ecb_encrypt function. */
+#cmakedefine HAVE_WOLFSSL_DES_ECB_ENCRYPT 1
+
+/* if wolfSSL has the wolfSSL_BIO_set_shutdown function. */
+#cmakedefine HAVE_WOLFSSL_FULL_BIO 1
 
 /* if libSSH is in use */
 #cmakedefine USE_LIBSSH 1
@@ -722,7 +728,7 @@ ${SIZEOF_TIME_T_CODE}
 /* if GSASL is in use */
 #cmakedefine USE_GSASL 1
 
-/* Define to 1 if you don't want the OpenSSL configuration to be loaded
+/* Define to 1 if you do not want the OpenSSL configuration to be loaded
    automatically */
 #cmakedefine CURL_DISABLE_OPENSSL_AUTO_LOAD_CONFIG 1
 

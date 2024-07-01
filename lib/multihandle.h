@@ -148,6 +148,8 @@ struct Curl_multi {
 
   long max_total_connections; /* if >0, a fixed limit of the maximum number
                                  of connections in total */
+  long max_shutdown_connections; /* if >0, a fixed limit of the maximum number
+                                 of connections in shutdown handling */
 
   /* timer callback and user data pointer for the *socket() API */
   curl_multi_timer_callback timer_cb;
@@ -165,7 +167,7 @@ struct Curl_multi {
 #endif
   unsigned int max_concurrent_streams;
   unsigned int maxconnects; /* if >0, a fixed limit of the maximum number of
-                               entries we're allowed to grow the connection
+                               entries we are allowed to grow the connection
                                cache to */
 #define IPV6_UNKNOWN 0
 #define IPV6_DEAD    1

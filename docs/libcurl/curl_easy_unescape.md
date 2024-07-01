@@ -6,14 +6,14 @@ Section: 3
 Source: libcurl
 See-also:
   - curl_easy_escape (3)
-  - curl_free (3)
+  - curl_url_get (3)
 Protocol:
   - All
 ---
 
 # NAME
 
-curl_easy_unescape - URL decodes the given string
+curl_easy_unescape - URL decode a string
 
 # SYNOPSIS
 

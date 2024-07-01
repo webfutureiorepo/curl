@@ -286,7 +286,7 @@ static CURLcode getaddrinfo_complete(struct Curl_easy *data)
 
   result = Curl_addrinfo_callback(data, tsd->sock_error, tsd->res);
   /* The tsd->res structure has been copied to async.dns and perhaps the DNS
-     cache.  Set our copy to NULL so destroy_thread_sync_data doesn't free it.
+     cache. Set our copy to NULL so destroy_thread_sync_data does not free it.
   */
   tsd->res = NULL;
 
@@ -790,8 +790,8 @@ void Curl_resolver_kill(struct Curl_easy *data)
 {
   struct thread_data *td = data->state.async.tdata;
 
-  /* If we're still resolving, we must wait for the threads to fully clean up,
-     unfortunately.  Otherwise, we can simply cancel to clean up any resolver
+  /* If we are still resolving, we must wait for the threads to fully clean up,
+     unfortunately. Otherwise, we can simply cancel to clean up any resolver
      data. */
 #ifdef _WIN32
   if(td && td->complete_ev) {
@@ -862,7 +862,7 @@ CURLcode Curl_resolver_is_resolved(struct Curl_easy *data,
   }
   else {
     /* poll for name lookup done with exponential backoff up to 250ms */
-    /* should be fine even if this converts to 32 bit */
+    /* should be fine even if this converts to 32-bit */
     timediff_t elapsed = Curl_timediff(Curl_now(),
                                        data->progress.t_startsingle);
     if(elapsed < 0)

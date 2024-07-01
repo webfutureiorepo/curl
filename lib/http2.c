@@ -83,11 +83,10 @@
 /* spare chunks we keep for a full window */
 #define H2_STREAM_POOL_SPARES   (H2_STREAM_WINDOW_SIZE / H2_CHUNK_SIZE)
 
-/* We need to accommodate the max number of streams with their window
- * sizes on the overall connection. Streams might become PAUSED which
- * will block their received QUOTA in the connection window. And if we
- * run out of space, the server is blocked from sending us any data.
- * See #10988 for an issue with this. */
+/* We need to accommodate the max number of streams with their window sizes on
+ * the overall connection. Streams might become PAUSED which will block their
+ * received QUOTA in the connection window. If we run out of space, the server
+ * is blocked from sending us any data. See #10988 for an issue with this. */
 #define HTTP2_HUGE_WINDOW_SIZE (100 * H2_STREAM_WINDOW_SIZE)
 
 #define H2_SETTINGS_IV_LEN  3
@@ -140,7 +139,6 @@ struct cf_h2_ctx {
   BIT(rcvd_goaway);
   BIT(sent_goaway);
   BIT(enable_push);
-  BIT(shutdown);
   BIT(nw_out_blocked);
 };
 
@@ -611,8 +609,8 @@ static bool http2_connisalive(struct Curl_cfilter *cf, struct Curl_easy *data,
     return FALSE;
 
   if(*input_pending) {
-    /* This happens before we've sent off a request and the connection is
-       not in use by any other transfer, there shouldn't be any data here,
+    /* This happens before we have sent off a request and the connection is
+       not in use by any other transfer, there should not be any data here,
        only "protocol frames" */
     CURLcode result;
     ssize_t nread = -1;
@@ -1040,7 +1038,7 @@ static CURLcode on_stream_frame(struct Curl_cfilter *cf,
     break;
   case NGHTTP2_HEADERS:
     if(stream->bodystarted) {
-      /* Only valid HEADERS after body started is trailer HEADERS.  We
+      /* Only valid HEADERS after body started is trailer HEADERS. We
          buffer them in on_header callback. */
       break;
     }
@@ -1702,7 +1700,7 @@ static ssize_t http2_handle_stream_close(struct Curl_cfilter *cf,
   if(stream->error == NGHTTP2_REFUSED_STREAM) {
     CURL_TRC_CF(data, cf, "[%d] REFUSED_STREAM, try again on a new "
                 "connection", stream->id);
-    connclose(cf->conn, "REFUSED_STREAM"); /* don't use this anymore */
+    connclose(cf->conn, "REFUSED_STREAM"); /* do not use this anymore */
     data->state.refused_stream = TRUE;
     *err = CURLE_RECV_ERROR; /* trigger Curl_retry_request() later */
     return -1;
@@ -1809,7 +1807,7 @@ static void h2_pri_spec(struct cf_h2_ctx *ctx,
 }
 
 /*
- * Check if there's been an update in the priority /
+ * Check if there is been an update in the priority /
  * dependency settings and if so it submits a PRIORITY frame with the updated
  * info.
  * Flush any out data pending in the network buffer.
@@ -2007,7 +2005,7 @@ static ssize_t cf_h2_recv(struct Curl_cfilter *cf, struct Curl_easy *data,
 out:
   result = h2_progress_egress(cf, data);
   if(result == CURLE_AGAIN) {
-    /* pending data to send, need to be called again. Ideally, we'd
+    /* pending data to send, need to be called again. Ideally, we would
      * monitor the socket for POLLOUT, but we might not be in SENDING
      * transfer state any longer and are unable to make this happen.
      */
@@ -2375,7 +2373,7 @@ static void cf_h2_adjust_pollset(struct Curl_cfilter *cf,
     Curl_pollset_set(data, ps, sock, want_recv, want_send);
     CF_DATA_RESTORE(cf, save);
   }
-  else if(ctx->sent_goaway && !ctx->shutdown) {
+  else if(ctx->sent_goaway && !cf->shutdown) {
     /* shutdown in progress */
     CF_DATA_SAVE(save, cf, data);
     want_send = nghttp2_session_want_write(ctx->h2);
@@ -2467,13 +2465,16 @@ static CURLcode cf_h2_shutdown(struct Curl_cfilter *cf,
                                struct Curl_easy *data, bool *done)
 {
   struct cf_h2_ctx *ctx = cf->ctx;
+  struct cf_call_data save;
   CURLcode result;
   int rv;
 
-  if(!cf->connected || !ctx->h2 || ctx->shutdown) {
+  if(!cf->connected || !ctx->h2 || cf->shutdown || ctx->conn_closed) {
     *done = TRUE;
     return CURLE_OK;
   }
+
+  CF_DATA_SAVE(save, cf, data);
 
   if(!ctx->sent_goaway) {
     rv = nghttp2_submit_goaway(ctx->h2, NGHTTP2_FLAG_NONE,
@@ -2482,7 +2483,8 @@ static CURLcode cf_h2_shutdown(struct Curl_cfilter *cf,
     if(rv) {
       failf(data, "nghttp2_submit_goaway() failed: %s(%d)",
             nghttp2_strerror(rv), rv);
-      return CURLE_SEND_ERROR;
+      result = CURLE_SEND_ERROR;
+      goto out;
     }
     ctx->sent_goaway = TRUE;
   }
@@ -2493,9 +2495,13 @@ static CURLcode cf_h2_shutdown(struct Curl_cfilter *cf,
   if(!result && nghttp2_session_want_read(ctx->h2))
     result = h2_progress_ingress(cf, data, 0);
 
-  *done = !result && !nghttp2_session_want_write(ctx->h2) &&
-          !nghttp2_session_want_read(ctx->h2);
-  ctx->shutdown = (result || *done);
+  *done = (ctx->conn_closed ||
+           (!result && !nghttp2_session_want_write(ctx->h2) &&
+            !nghttp2_session_want_read(ctx->h2)));
+
+out:
+  CF_DATA_RESTORE(cf, save);
+  cf->shutdown = (result || *done);
   return result;
 }
 
@@ -2767,7 +2773,7 @@ bool Curl_http2_may_switch(struct Curl_easy *data,
      data->state.httpwant == CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE) {
 #ifndef CURL_DISABLE_PROXY
     if(conn->bits.httpproxy && !conn->bits.tunnel_proxy) {
-      /* We don't support HTTP/2 proxies yet. Also it's debatable
+      /* We do not support HTTP/2 proxies yet. Also it is debatable
          whether or not this setting should apply to HTTP/2 proxies. */
       infof(data, "Ignoring HTTP/2 prior knowledge due to proxy");
       return FALSE;
@@ -2791,7 +2797,7 @@ CURLcode Curl_http2_switch(struct Curl_easy *data,
   if(result)
     return result;
 
-  conn->httpversion = 20; /* we know we're on HTTP/2 now */
+  conn->httpversion = 20; /* we know we are on HTTP/2 now */
   conn->bits.multiplex = TRUE; /* at least potentially multiplexed */
   conn->bundle->multiuse = BUNDLE_MULTIPLEX;
   Curl_multi_connchanged(data->multi);
@@ -2815,7 +2821,7 @@ CURLcode Curl_http2_switch_at(struct Curl_cfilter *cf, struct Curl_easy *data)
     return result;
 
   cf_h2 = cf->next;
-  cf->conn->httpversion = 20; /* we know we're on HTTP/2 now */
+  cf->conn->httpversion = 20; /* we know we are on HTTP/2 now */
   cf->conn->bits.multiplex = TRUE; /* at least potentially multiplexed */
   cf->conn->bundle->multiuse = BUNDLE_MULTIPLEX;
   Curl_multi_connchanged(data->multi);
@@ -2868,7 +2874,7 @@ CURLcode Curl_http2_upgrade(struct Curl_easy *data,
           " after upgrade: len=%zu", nread);
   }
 
-  conn->httpversion = 20; /* we know we're on HTTP/2 now */
+  conn->httpversion = 20; /* we know we are on HTTP/2 now */
   conn->bits.multiplex = TRUE; /* at least potentially multiplexed */
   conn->bundle->multiuse = BUNDLE_MULTIPLEX;
   Curl_multi_connchanged(data->multi);

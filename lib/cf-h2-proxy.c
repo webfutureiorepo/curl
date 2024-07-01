@@ -162,8 +162,8 @@ static void h2_tunnel_go_state(struct Curl_cfilter *cf,
       CURL_TRC_CF(data, cf, "[%d] new tunnel state 'failed'", ts->stream_id);
     ts->state = new_state;
     /* If a proxy-authorization header was used for the proxy, then we should
-       make sure that it isn't accidentally used for the document request
-       after we've connected. So let's free and clear it here. */
+       make sure that it is not accidentally used for the document request
+       after we have connected. So let's free and clear it here. */
     Curl_safefree(data->state.aptr.proxyuserpwd);
     break;
   }
@@ -183,7 +183,6 @@ struct cf_h2_proxy_ctx {
   BIT(conn_closed);
   BIT(rcvd_goaway);
   BIT(sent_goaway);
-  BIT(shutdown);
   BIT(nw_out_blocked);
 };
 
@@ -1172,13 +1171,16 @@ static CURLcode cf_h2_proxy_shutdown(struct Curl_cfilter *cf,
                                      struct Curl_easy *data, bool *done)
 {
   struct cf_h2_proxy_ctx *ctx = cf->ctx;
+  struct cf_call_data save;
   CURLcode result;
   int rv;
 
-  if(!cf->connected || !ctx->h2 || ctx->shutdown) {
+  if(!cf->connected || !ctx->h2 || cf->shutdown || ctx->conn_closed) {
     *done = TRUE;
     return CURLE_OK;
   }
+
+  CF_DATA_SAVE(save, cf, data);
 
   if(!ctx->sent_goaway) {
     rv = nghttp2_submit_goaway(ctx->h2, NGHTTP2_FLAG_NONE,
@@ -1187,7 +1189,8 @@ static CURLcode cf_h2_proxy_shutdown(struct Curl_cfilter *cf,
     if(rv) {
       failf(data, "nghttp2_submit_goaway() failed: %s(%d)",
             nghttp2_strerror(rv), rv);
-      return CURLE_SEND_ERROR;
+      result = CURLE_SEND_ERROR;
+      goto out;
     }
     ctx->sent_goaway = TRUE;
   }
@@ -1198,9 +1201,12 @@ static CURLcode cf_h2_proxy_shutdown(struct Curl_cfilter *cf,
   if(!result && nghttp2_session_want_read(ctx->h2))
     result = proxy_h2_progress_ingress(cf, data);
 
-  *done = !result && !nghttp2_session_want_write(ctx->h2) &&
-          !nghttp2_session_want_read(ctx->h2);
-  ctx->shutdown = (result || *done);
+  *done = (ctx->conn_closed ||
+           (!result && !nghttp2_session_want_write(ctx->h2) &&
+            !nghttp2_session_want_read(ctx->h2)));
+out:
+  CF_DATA_RESTORE(cf, save);
+  cf->shutdown = (result || *done);
   return result;
 }
 
@@ -1240,7 +1246,7 @@ static void cf_h2_proxy_adjust_pollset(struct Curl_cfilter *cf,
     Curl_pollset_set(data, ps, sock, want_recv, want_send);
     CF_DATA_RESTORE(cf, save);
   }
-  else if(ctx->sent_goaway && !ctx->shutdown) {
+  else if(ctx->sent_goaway && !cf->shutdown) {
     /* shutdown in progress */
     CF_DATA_SAVE(save, cf, data);
     want_send = nghttp2_session_want_write(ctx->h2);
@@ -1260,7 +1266,7 @@ static ssize_t h2_handle_tunnel_close(struct Curl_cfilter *cf,
   if(ctx->tunnel.error == NGHTTP2_REFUSED_STREAM) {
     CURL_TRC_CF(data, cf, "[%d] REFUSED_STREAM, try again on a new "
                 "connection", ctx->tunnel.stream_id);
-    connclose(cf->conn, "REFUSED_STREAM"); /* don't use this anymore */
+    connclose(cf->conn, "REFUSED_STREAM"); /* do not use this anymore */
     *err = CURLE_RECV_ERROR; /* trigger Curl_retry_request() later */
     return -1;
   }
@@ -1353,7 +1359,7 @@ static ssize_t cf_h2_proxy_recv(struct Curl_cfilter *cf,
 
   result = proxy_h2_progress_egress(cf, data);
   if(result == CURLE_AGAIN) {
-    /* pending data to send, need to be called again. Ideally, we'd
+    /* pending data to send, need to be called again. Ideally, we would
      * monitor the socket for POLLOUT, but we might not be in SENDING
      * transfer state any longer and are unable to make this happen.
      */
@@ -1536,8 +1542,8 @@ static bool proxy_h2_connisalive(struct Curl_cfilter *cf,
     return FALSE;
 
   if(*input_pending) {
-    /* This happens before we've sent off a request and the connection is
-       not in use by any other transfer, there shouldn't be any data here,
+    /* This happens before we have sent off a request and the connection is
+       not in use by any other transfer, there should not be any data here,
        only "protocol frames" */
     CURLcode result;
     ssize_t nread = -1;
