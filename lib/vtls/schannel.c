@@ -55,6 +55,7 @@
 #include "multiif.h"
 #include "version_win32.h"
 #include "rand.h"
+#include "strparse.h"
 
 /* The last #include file should be: */
 #include "curl_memory.h"
@@ -73,15 +74,12 @@
 
 /* ALPN requires version 8.1 of the Windows SDK, which was
    shipped with Visual Studio 2013, aka _MSC_VER 1800:
-
-   https://technet.microsoft.com/en-us/library/hh831771%28v=ws.11%29.aspx
+     https://technet.microsoft.com/en-us/library/hh831771%28v=ws.11%29.aspx
+   Or mingw-w64 9.0 or upper.
 */
-#if defined(_MSC_VER) && (_MSC_VER >= 1800) && !defined(_USING_V110_SDK71_)
+#if (defined(__MINGW32__) && __MINGW64_VERSION_MAJOR >= 9) || \
+  (defined(_MSC_VER) && (_MSC_VER >= 1800) && !defined(_USING_V110_SDK71_))
 #  define HAS_ALPN_SCHANNEL
-#endif
-
-#ifndef BCRYPT_CHACHA20_POLY1305_ALGORITHM
-#define BCRYPT_CHACHA20_POLY1305_ALGORITHM L"CHACHA20_POLY1305"
 #endif
 
 #ifndef BCRYPT_CHAIN_MODE_CCM
@@ -232,8 +230,6 @@ schannel_set_ssl_version_min_max(DWORD *enabled_protocols,
   return CURLE_OK;
 }
 
-/* longest is 26, buffer is slightly bigger */
-#define LONGEST_ALG_ID 32
 #define CIPHEROPTION(x) {#x, x}
 
 struct algo {
@@ -350,9 +346,9 @@ static const struct algo algs[]= {
 };
 
 static int
-get_alg_id_by_name(char *name)
+get_alg_id_by_name(const char *name)
 {
-  char *nameEnd = strchr(name, ':');
+  const char *nameEnd = strchr(name, ':');
   size_t n = nameEnd ? (size_t)(nameEnd - name) : strlen(name);
   int i;
 
@@ -369,12 +365,13 @@ static CURLcode
 set_ssl_ciphers(SCHANNEL_CRED *schannel_cred, char *ciphers,
                 ALG_ID *algIds)
 {
-  char *startCur = ciphers;
+  const char *startCur = ciphers;
   int algCount = 0;
   while(startCur && (0 != *startCur) && (algCount < NUM_CIPHERS)) {
-    long alg = strtol(startCur, 0, 0);
-    if(!alg)
+    curl_off_t alg;
+    if(Curl_str_number(&startCur, &alg, INT_MAX) || !alg)
       alg = get_alg_id_by_name(startCur);
+
     if(alg)
       algIds[algCount++] = (ALG_ID)alg;
     else if(!strncmp(startCur, "USE_STRONG_CRYPTO",
@@ -908,17 +905,26 @@ schannel_connect_step1(struct Curl_cfilter *cf, struct Curl_easy *data)
           "connect to some servers due to lack of SNI, algorithms, etc.");
   }
 
+  {
 #ifdef HAS_ALPN_SCHANNEL
-  /* ALPN is only supported on Windows 8.1 / Server 2012 R2 and above.
-     Also it does not seem to be supported for WINE, see curl bug #983. */
-  backend->use_alpn = connssl->alpn &&
-    !GetProcAddress(GetModuleHandle(TEXT("ntdll")),
-                    "wine_get_version") &&
-    curlx_verify_windows_version(6, 3, 0, PLATFORM_WINNT,
-                                 VERSION_GREATER_THAN_EQUAL);
+    bool wine;
+#ifdef CURL_WINDOWS_UWP
+    /* GetModuleHandle() not available for UWP.
+       Assume no WINE because WINE has no UWP support. */
+    wine = FALSE;
 #else
-  backend->use_alpn = FALSE;
+    wine = !!GetProcAddress(GetModuleHandle(TEXT("ntdll")),
+                            "wine_get_version");
 #endif
+    /* ALPN is only supported on Windows 8.1 / Server 2012 R2 and above.
+       Also it does not seem to be supported for WINE, see curl bug #983. */
+    backend->use_alpn = connssl->alpn && !wine &&
+      curlx_verify_windows_version(6, 3, 0, PLATFORM_WINNT,
+                                   VERSION_GREATER_THAN_EQUAL);
+#else
+    backend->use_alpn = FALSE;
+#endif
+  }
 
 #ifdef _WIN32_WCE
 #ifdef HAS_MANUAL_VERIFY_API

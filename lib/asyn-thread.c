@@ -158,10 +158,7 @@ static struct thread_sync_data *conn_thread_sync_data(struct Curl_easy *data)
 static
 void destroy_thread_sync_data(struct thread_sync_data *tsd)
 {
-  if(tsd->mtx) {
-    Curl_mutex_destroy(tsd->mtx);
-    free(tsd->mtx);
-  }
+  Curl_mutex_destroy(&tsd->mutx);
 
   free(tsd->hostname);
 
@@ -206,11 +203,7 @@ int init_thread_sync_data(struct thread_data *td,
   (void) hints;
 #endif
 
-  tsd->mtx = malloc(sizeof(curl_mutex_t));
-  if(!tsd->mtx)
-    goto err_exit;
-
-  Curl_mutex_init(tsd->mtx);
+  Curl_mutex_init(&tsd->mutx);
 
 #ifndef CURL_DISABLE_SOCKETPAIR
   /* create socket pair or pipe */
@@ -291,10 +284,10 @@ CURL_STDCALL getaddrinfo_thread(void *arg)
     Curl_addrinfo_set_port(tsd->res, tsd->port);
   }
 
-  Curl_mutex_acquire(tsd->mtx);
+  Curl_mutex_acquire(&tsd->mutx);
   if(tsd->done) {
     /* too late, gotta clean up the mess */
-    Curl_mutex_release(tsd->mtx);
+    Curl_mutex_release(&tsd->mutx);
     destroy_thread_sync_data(tsd);
   }
   else {
@@ -313,7 +306,7 @@ CURL_STDCALL getaddrinfo_thread(void *arg)
     }
 #endif
     tsd->done = TRUE;
-    Curl_mutex_release(tsd->mtx);
+    Curl_mutex_release(&tsd->mutx);
   }
 
   return 0;
@@ -343,15 +336,15 @@ CURL_STDCALL gethostbyname_thread(void *arg)
       tsd->sock_error = RESOLVER_ENOMEM;
   }
 
-  Curl_mutex_acquire(tsd->mtx);
+  Curl_mutex_acquire(&tsd->mutx);
   if(tsd->done) {
     /* too late, gotta clean up the mess */
-    Curl_mutex_release(tsd->mtx);
+    Curl_mutex_release(&tsd->mutx);
     destroy_thread_sync_data(tsd);
   }
   else {
     tsd->done = TRUE;
-    Curl_mutex_release(tsd->mtx);
+    Curl_mutex_release(&tsd->mutx);
   }
 
   return 0;
@@ -382,10 +375,10 @@ static void destroy_async_data(struct Curl_easy *data)
      * if the thread is still blocking in the resolve syscall, detach it and
      * let the thread do the cleanup...
      */
-    Curl_mutex_acquire(td->tsd.mtx);
+    Curl_mutex_acquire(&td->tsd.mutx);
     done = td->tsd.done;
     td->tsd.done = TRUE;
-    Curl_mutex_release(td->tsd.mtx);
+    Curl_mutex_release(&td->tsd.mutx);
 
     if(!done) {
       Curl_thread_destroy(td->thread_hnd);
@@ -444,7 +437,6 @@ static bool init_resolve_thread(struct Curl_easy *data,
 
   async->port = port;
   async->done = FALSE;
-  async->status = 0;
   async->dns = NULL;
   td->thread_hnd = curl_thread_t_null;
   td->start = Curl_now();
@@ -588,22 +580,24 @@ CURLcode Curl_resolver_is_resolved(struct Curl_easy *data,
     return CURLE_UNRECOVERABLE_POLL;
 #endif
 
-  Curl_mutex_acquire(td->tsd.mtx);
+  Curl_mutex_acquire(&td->tsd.mutx);
   done = td->tsd.done;
-  Curl_mutex_release(td->tsd.mtx);
+  Curl_mutex_release(&td->tsd.mutx);
 
   if(done) {
+    CURLcode result = td->result;
     getaddrinfo_complete(data);
 
-    if(!data->state.async.dns) {
-      CURLcode result = Curl_resolver_error(data);
+    if(!result && !data->state.async.dns)
+      result = Curl_resolver_error(data);
+
+    if(result) {
       destroy_async_data(data);
       return result;
     }
 #ifdef USE_HTTPSRR_ARES
     {
-      struct Curl_https_rrinfo *lhrr =
-        Curl_memdup(&td->hinfo, sizeof(struct Curl_https_rrinfo));
+      struct Curl_https_rrinfo *lhrr = Curl_httpsrr_dup_move(&td->hinfo);
       if(!lhrr) {
         destroy_async_data(data);
         return CURLE_OUT_OF_MEMORY;
@@ -642,9 +636,7 @@ CURLcode Curl_resolver_is_resolved(struct Curl_easy *data,
 int Curl_resolver_getsock(struct Curl_easy *data, curl_socket_t *socks)
 {
   int ret_val = 0;
-#ifndef CURL_DISABLE_SOCKETPAIR
   struct thread_data *td = &data->state.async.thdata;
-#endif
 #if !defined(CURL_DISABLE_SOCKETPAIR) || defined(USE_HTTPSRR_ARES)
   int socketi = 0;
 #else
@@ -692,8 +684,6 @@ struct Curl_addrinfo *Curl_resolver_getaddrinfo(struct Curl_easy *data,
                                                 int port,
                                                 int *waitp)
 {
-  struct thread_data *td = &data->state.async.thdata;
-
   *waitp = 0; /* default to synchronous response */
 
   /* fire up a new resolver thread! */

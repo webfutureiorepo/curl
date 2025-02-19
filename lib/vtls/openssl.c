@@ -151,13 +151,6 @@
 #define CONST_EXTS const
 #define HAVE_ERR_REMOVE_THREAD_STATE_DEPRECATED 1
 
-/* funny typecast define due to difference in API */
-#ifdef LIBRESSL_VERSION_NUMBER
-#define ARG2_X509_signature_print (X509_ALGOR *)
-#else
-#define ARG2_X509_signature_print
-#endif
-
 #else
 /* For OpenSSL before 1.1.0 */
 #define ASN1_STRING_get0_data(x) ASN1_STRING_data(x)
@@ -850,14 +843,6 @@ static void ossl_bio_cf_method_free(BIO_METHOD *m)
 #endif
 
 
-/*
- * Number of bytes to read from the random number seed file. This must be
- * a finite value (because some entropy "files" like /dev/urandom have
- * an infinite length), but must be large enough to provide enough
- * entropy to properly seed OpenSSL's PRNG.
- */
-#define RAND_LOAD_LENGTH 1024
-
 #ifdef HAVE_KEYLOG_CALLBACK
 static void ossl_keylog_callback(const SSL *ssl, const char *line)
 {
@@ -1041,6 +1026,14 @@ static CURLcode ossl_seed(struct Curl_easy *data)
     }
     RAND_add(randb, (int)len, (double)len/2);
   } while(!rand_enough());
+
+  /*
+   * Number of bytes to read from the random number seed file. This must be
+   * a finite value (because some entropy "files" like /dev/urandom have
+   * an infinite length), but must be large enough to provide enough
+   * entropy to properly seed OpenSSL's PRNG.
+   */
+#  define RAND_LOAD_LENGTH 1024
 
   {
     /* generates a default path for the random seed file */
@@ -1296,9 +1289,7 @@ int cert_stuff(struct Curl_easy *data,
   if(cert_file || cert_blob || (file_type == SSL_FILETYPE_ENGINE) ||
      (file_type == SSL_FILETYPE_PROVIDER)) {
     SSL *ssl;
-    X509 *x509 = NULL;
-    EVP_PKEY *pri = NULL;
-    STACK_OF(X509) *ca = NULL;
+    X509 *x509;
     int cert_done = 0;
     int cert_use_result;
 
@@ -1461,7 +1452,7 @@ int cert_stuff(struct Curl_easy *data,
           failf(data, "No cert found in the openssl store: %s",
                 ossl_strerror(ERR_get_error(), error_buffer,
                               sizeof(error_buffer)));
-          goto fail;
+          return 0;
         }
 
         if(SSL_CTX_use_certificate(ctx, cert) != 1) {
@@ -1487,6 +1478,8 @@ int cert_stuff(struct Curl_easy *data,
     {
       BIO *cert_bio = NULL;
       PKCS12 *p12 = NULL;
+      EVP_PKEY *pri;
+      STACK_OF(X509) *ca = NULL;
       if(cert_blob) {
         cert_bio = BIO_new_mem_buf(cert_blob->data, (int)(cert_blob->len));
         if(!cert_bio) {
@@ -1735,7 +1728,7 @@ fail:
           failf(data, "No private key found in the openssl store: %s",
                 ossl_strerror(ERR_get_error(), error_buffer,
                               sizeof(error_buffer)));
-          goto fail;
+          return 0;
         }
 
         if(SSL_CTX_use_PrivateKey(ctx, priv_key) != 1) {

@@ -574,7 +574,6 @@ struct Curl_async {
   void *resolver; /* resolver state, if it is used in the URL state -
                      ares_channel e.g. */
   int port;
-  int status; /* if done is TRUE, this is the status from the callback */
   BIT(done);  /* set TRUE when the lookup is complete */
 };
 
@@ -1314,10 +1313,9 @@ struct UrlState {
     char *proxypasswd;
 #endif
   } aptr;
-  unsigned char httpwant; /* when non-zero, a specific HTTP version requested
-                             to be used in the library's request(s) */
-  unsigned char httpversion; /* the lowest HTTP version*10 reported by any
-                                server involved in this request */
+#ifndef CURL_DISABLE_HTTP
+  struct http_negotiation http_neg;
+#endif
   unsigned char httpreq; /* Curl_HttpReq; what kind of HTTP request (if any)
                             is this */
   unsigned char select_bits; /* != 0 -> bitmask of socket events for this

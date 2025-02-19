@@ -86,6 +86,7 @@
 #include "hsts.h"
 #include "ws.h"
 #include "curl_ctype.h"
+#include "strparse.h"
 
 /* The last 3 #include files should be in this order */
 #include "curl_printf.h"
@@ -186,19 +187,54 @@ const struct Curl_handler Curl_handler_https = {
 
 #endif
 
+void Curl_http_neg_init(struct Curl_easy *data, struct http_negotiation *neg)
+{
+  memset(neg, 0, sizeof(*neg));
+  neg->accept_09 = data->set.http09_allowed;
+  switch(data->set.httpwant) {
+  case CURL_HTTP_VERSION_1_0:
+    neg->allowed = (CURL_HTTP_V1x);
+    neg->only_10 = TRUE;
+    break;
+  case CURL_HTTP_VERSION_1_1:
+    neg->allowed = (CURL_HTTP_V1x);
+    break;
+  case CURL_HTTP_VERSION_2_0:
+    neg->allowed = (CURL_HTTP_V1x | CURL_HTTP_V2x);
+    neg->h2_upgrade = TRUE;
+    break;
+  case CURL_HTTP_VERSION_2TLS:
+    neg->allowed = (CURL_HTTP_V1x | CURL_HTTP_V2x);
+    break;
+  case CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE:
+    neg->allowed = (CURL_HTTP_V2x);
+    data->state.http_neg.h2_prior_knowledge = TRUE;
+    break;
+  case CURL_HTTP_VERSION_3:
+    neg->allowed = (CURL_HTTP_V1x | CURL_HTTP_V2x | CURL_HTTP_V3x);
+    break;
+  case CURL_HTTP_VERSION_3ONLY:
+    neg->allowed = (CURL_HTTP_V3x);
+    break;
+  case CURL_HTTP_VERSION_NONE:
+  default:
+    neg->allowed = (CURL_HTTP_V1x | CURL_HTTP_V2x | CURL_HTTP_V3x);
+    break;
+  }
+}
+
 CURLcode Curl_http_setup_conn(struct Curl_easy *data,
                               struct connectdata *conn)
 {
   /* allocate the HTTP-specific struct for the Curl_easy, only to survive
      during this request */
   connkeep(conn, "HTTP default");
-
-  if(data->state.httpwant == CURL_HTTP_VERSION_3ONLY) {
+  if(data->state.http_neg.allowed == CURL_HTTP_V3x) {
+    /* only HTTP/3, needs to work */
     CURLcode result = Curl_conn_may_http3(data, conn);
     if(result)
       return result;
   }
-
   return CURLE_OK;
 }
 
@@ -256,7 +292,7 @@ char *Curl_copy_header_value(const char *header)
 
   /* Find the first non-space letter */
   start = header;
-  while(*start && ISSPACE(*start))
+  while(ISSPACE(*start))
     start++;
 
   end = strchr(start, '\r');
@@ -537,7 +573,7 @@ CURLcode Curl_http_auth_act(struct Curl_easy *data)
        (data->req.httpversion_sent > 11)) {
       infof(data, "Forcing HTTP/1.1 for NTLM");
       connclose(conn, "Force HTTP/1.1 connection");
-      data->state.httpwant = CURL_HTTP_VERSION_1_1;
+      data->state.http_neg.allowed = CURL_HTTP_V1x;
     }
   }
 #ifndef CURL_DISABLE_PROXY
@@ -1015,7 +1051,7 @@ CURLcode Curl_http_input_auth(struct Curl_easy *data, bool proxy,
       auth++;
     if(*auth == ',') /* if we are on a comma, skip it */
       auth++;
-    while(*auth && ISSPACE(*auth))
+    while(ISSPACE(*auth))
       auth++;
   }
 
@@ -1403,7 +1439,7 @@ Curl_compareheader(const char *headerline, /* line to check */
   start = &headerline[hlen];
 
   /* pass all whitespace */
-  while(*start && ISSPACE(*start))
+  while(ISSPACE(*start))
     start++;
 
   /* find the end of the header line */
@@ -1501,29 +1537,28 @@ static bool http_may_use_1_1(const struct Curl_easy *data)
   const struct connectdata *conn = data->conn;
   /* We have seen a previous response for *this* transfer with 1.0,
    * on another connection or the same one. */
-  if(data->state.httpversion == 10)
+  if(data->state.http_neg.rcvd_min == 10)
     return FALSE;
   /* We have seen a previous response on *this* connection with 1.0. */
-  if(conn->httpversion_seen == 10)
+  if(conn && conn->httpversion_seen == 10)
     return FALSE;
   /* We want 1.0 and have seen no previous response on *this* connection
      with a higher version (maybe no response at all yet). */
-  if((data->state.httpwant == CURL_HTTP_VERSION_1_0) &&
-     (conn->httpversion_seen <= 10))
+  if((data->state.http_neg.only_10) &&
+     (!conn || conn->httpversion_seen <= 10))
     return FALSE;
-  /* We want something newer than 1.0 or have no preferences. */
-  return (data->state.httpwant == CURL_HTTP_VERSION_NONE) ||
-         (data->state.httpwant >= CURL_HTTP_VERSION_1_1);
+  /* We are not restricted to use 1.0 only. */
+  return !data->state.http_neg.only_10;
 }
 
 static unsigned char http_request_version(struct Curl_easy *data)
 {
-  unsigned char httpversion = Curl_conn_http_version(data);
-  if(!httpversion) {
+  unsigned char v = Curl_conn_http_version(data, data->conn);
+  if(!v) {
     /* No specific HTTP connection filter installed. */
-    httpversion = http_may_use_1_1(data) ? 11 : 10;
+    v = http_may_use_1_1(data) ? 11 : 10;
   }
-  return httpversion;
+  return v;
 }
 
 static const char *get_http_string(int httpversion)
@@ -1596,7 +1631,7 @@ CURLcode Curl_add_custom_headers(struct Curl_easy *data,
         if(ptr) {
           optr = ptr;
           ptr++; /* pass the semicolon */
-          while(*ptr && ISSPACE(*ptr))
+          while(ISSPACE(*ptr))
             ptr++;
 
           if(*ptr) {
@@ -1624,7 +1659,7 @@ CURLcode Curl_add_custom_headers(struct Curl_easy *data,
         /* we require a colon for this to be a true header */
 
         ptr++; /* pass the colon */
-        while(*ptr && ISSPACE(*ptr))
+        while(ISSPACE(*ptr))
           ptr++;
 
         if(*ptr || semicolonp) {
@@ -2620,11 +2655,11 @@ CURLcode Curl_http(struct Curl_easy *data, bool *done)
 
   switch(conn->alpn) {
   case CURL_HTTP_VERSION_3:
-    DEBUGASSERT(Curl_conn_http_version(data) == 30);
+    DEBUGASSERT(Curl_conn_http_version(data, conn) == 30);
     break;
   case CURL_HTTP_VERSION_2:
 #ifndef CURL_DISABLE_PROXY
-    if((Curl_conn_http_version(data) != 20) &&
+    if((Curl_conn_http_version(data, conn) != 20) &&
        conn->bits.proxy && !conn->bits.tunnel_proxy
       ) {
       result = Curl_http2_switch(data);
@@ -2633,7 +2668,7 @@ CURLcode Curl_http(struct Curl_easy *data, bool *done)
     }
     else
 #endif
-      DEBUGASSERT(Curl_conn_http_version(data) == 20);
+      DEBUGASSERT(Curl_conn_http_version(data, conn) == 20);
     break;
   case CURL_HTTP_VERSION_1_1:
     /* continue with HTTP/1.x when explicitly requested */
@@ -2814,7 +2849,8 @@ CURLcode Curl_http(struct Curl_easy *data, bool *done)
   }
 
   if(!Curl_conn_is_ssl(conn, FIRSTSOCKET) && (httpversion < 20) &&
-     (data->state.httpwant == CURL_HTTP_VERSION_2)) {
+     (data->state.http_neg.allowed & CURL_HTTP_V2x) &&
+     data->state.http_neg.h2_upgrade) {
     /* append HTTP2 upgrade magic stuff to the HTTP request if it is not done
        over SSL */
     result = Curl_http2_request_upgrade(&req, data);
@@ -3072,11 +3108,10 @@ static CURLcode http_header(struct Curl_easy *data,
 
       /* if it truly stopped on a digit */
       if(ISDIGIT(*ptr)) {
-        if(!curlx_strtoofft(ptr, NULL, 10, &k->offset)) {
-          if(data->state.resume_from == k->offset)
-            /* we asked for a resume and we got it */
-            k->content_range = TRUE;
-        }
+        if(!Curl_str_number(&ptr, &k->offset, CURL_OFF_T_MAX) &&
+           (data->state.resume_from == k->offset))
+          /* we asked for a resume and we got it */
+          k->content_range = TRUE;
       }
       else if(k->httpcode < 300)
         data->state.resume_from = 0; /* get everything */
@@ -3346,9 +3381,10 @@ static CURLcode http_statusline(struct Curl_easy *data,
   data->info.httpversion = k->httpversion;
   conn->httpversion_seen = (unsigned char)k->httpversion;
 
-  if(!data->state.httpversion || data->state.httpversion > k->httpversion)
+  if(!data->state.http_neg.rcvd_min ||
+     data->state.http_neg.rcvd_min > k->httpversion)
     /* store the lowest server version we encounter */
-    data->state.httpversion = (unsigned char)k->httpversion;
+    data->state.http_neg.rcvd_min = (unsigned char)k->httpversion;
 
   /*
    * This code executes as part of processing the header. As a
@@ -3847,7 +3883,7 @@ static CURLcode http_rw_hd(struct Curl_easy *data,
        */
       const char *p = hd;
 
-      while(*p && ISBLANK(*p))
+      while(ISBLANK(*p))
         p++;
       if(!strncmp(p, "HTTP/", 5)) {
         p += 5;
@@ -3907,7 +3943,7 @@ static CURLcode http_rw_hd(struct Curl_easy *data,
     }
     else if(data->conn->handler->protocol & CURLPROTO_RTSP) {
       const char *p = hd;
-      while(*p && ISBLANK(*p))
+      while(ISBLANK(*p))
         p++;
       if(!strncmp(p, "RTSP/", 5)) {
         p += 5;
@@ -4014,7 +4050,7 @@ static CURLcode http_parse_headers(struct Curl_easy *data,
             failf(data, "Invalid status line");
             return CURLE_WEIRD_SERVER_REPLY;
           }
-          if(!data->set.http09_allowed) {
+          if(!data->state.http_neg.accept_09) {
             failf(data, "Received HTTP/0.9 when not allowed");
             return CURLE_UNSUPPORTED_PROTOCOL;
           }
@@ -4051,7 +4087,7 @@ static CURLcode http_parse_headers(struct Curl_easy *data,
           failf(data, "Invalid status line");
           return CURLE_WEIRD_SERVER_REPLY;
         }
-        if(!data->set.http09_allowed) {
+        if(!data->state.http_neg.accept_09) {
           failf(data, "Received HTTP/0.9 when not allowed");
           return CURLE_UNSUPPORTED_PROTOCOL;
         }
@@ -4420,7 +4456,7 @@ static struct name_const H2_NON_FIELD[] = {
 static bool h2_non_field(const char *name, size_t namelen)
 {
   size_t i;
-  for(i = 0; i < sizeof(H2_NON_FIELD)/sizeof(H2_NON_FIELD[0]); ++i) {
+  for(i = 0; i < CURL_ARRAYSIZE(H2_NON_FIELD); ++i) {
     if(namelen < H2_NON_FIELD[i].namelen)
       return FALSE;
     if(namelen == H2_NON_FIELD[i].namelen &&
@@ -4448,7 +4484,7 @@ CURLcode Curl_http_req_to_h2(struct dynhds *h2_headers,
     scheme = Curl_checkheaders(data, STRCONST(HTTP_PSEUDO_SCHEME));
     if(scheme) {
       scheme += sizeof(HTTP_PSEUDO_SCHEME);
-      while(*scheme && ISBLANK(*scheme))
+      while(ISBLANK(*scheme))
         scheme++;
       infof(data, "set pseudo header %s to %s", HTTP_PSEUDO_SCHEME, scheme);
     }

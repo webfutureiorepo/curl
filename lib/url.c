@@ -75,7 +75,6 @@
 #include "strcase.h"
 #include "strerror.h"
 #include "escape.h"
-#include "strtok.h"
 #include "share.h"
 #include "content_encoding.h"
 #include "http_digest.h"
@@ -119,7 +118,7 @@
 #include "altsvc.h"
 #include "dynbuf.h"
 #include "headers.h"
-
+#include "strparse.h"
 /* The last 3 #include files should be in this order */
 #include "curl_printf.h"
 #include "curl_memory.h"
@@ -653,15 +652,20 @@ bool Curl_on_disconnect(struct Curl_easy *data,
 static bool xfer_may_multiplex(const struct Curl_easy *data,
                                const struct connectdata *conn)
 {
+#ifndef CURL_DISABLE_HTTP
   /* If an HTTP protocol and multiplexing is enabled */
   if((conn->handler->protocol & PROTO_FAMILY_HTTP) &&
      (!conn->bits.protoconnstart || !conn->bits.close)) {
 
     if(Curl_multiplex_wanted(data->multi) &&
-       (data->state.httpwant >= CURL_HTTP_VERSION_2))
+       (data->state.http_neg.allowed & (CURL_HTTP_V2x|CURL_HTTP_V3x)))
       /* allows HTTP/2 or newer */
       return TRUE;
   }
+#else
+  (void)data;
+  (void)conn;
+#endif
   return FALSE;
 }
 
@@ -836,8 +840,6 @@ static bool ssh_config_matches(struct connectdata *one,
   return Curl_safecmp(one->proto.sshc.rsa, two->proto.sshc.rsa) &&
          Curl_safecmp(one->proto.sshc.rsa_pub, two->proto.sshc.rsa_pub);
 }
-#else
-#define ssh_config_matches(x,y) FALSE
 #endif
 
 struct url_conn_match {
@@ -995,8 +997,9 @@ static bool url_match_conn(struct connectdata *conn, void *userdata)
   }
 #endif
 
+#ifndef CURL_DISABLE_HTTP
   if(match->may_multiplex &&
-     (data->state.httpwant == CURL_HTTP_VERSION_2_0) &&
+     (data->state.http_neg.allowed & (CURL_HTTP_V2x|CURL_HTTP_V3x)) &&
      (needle->handler->protocol & CURLPROTO_HTTP) &&
      !conn->httpversion_seen) {
     if(data->set.pipewait) {
@@ -1008,6 +1011,7 @@ static bool url_match_conn(struct connectdata *conn, void *userdata)
     infof(data, "Server upgrade cannot be used");
     return FALSE;
   }
+#endif
 
   if(!(needle->handler->flags & PROTOPT_CREDSPERREQUEST)) {
     /* This protocol requires credentials per connection,
@@ -1028,27 +1032,38 @@ static bool url_match_conn(struct connectdata *conn, void *userdata)
     return FALSE;
 #endif
 
-  /* If looking for HTTP and the HTTP version we want is less
-   * than the HTTP version of conn, continue looking.
+#ifndef CURL_DISABLE_HTTP
+  /* If looking for HTTP and the HTTP versions allowed do not include
+   * the HTTP version of conn, continue looking.
    * CURL_HTTP_VERSION_2TLS is default which indicates no preference,
    * so we take any existing connection. */
-  if((needle->handler->protocol & PROTO_FAMILY_HTTP) &&
-     (data->state.httpwant != CURL_HTTP_VERSION_2TLS)) {
-    unsigned char httpversion = Curl_conn_http_version(data);
-    if((httpversion >= 20) &&
-       (data->state.httpwant < CURL_HTTP_VERSION_2_0)) {
-      DEBUGF(infof(data, "nor reusing conn #%" CURL_FORMAT_CURL_OFF_T
-             " with httpversion=%d, we want a version less than h2",
-             conn->connection_id, httpversion));
-    }
-    if((httpversion >= 30) &&
-       (data->state.httpwant < CURL_HTTP_VERSION_3)) {
-      DEBUGF(infof(data, "nor reusing conn #%" CURL_FORMAT_CURL_OFF_T
-             " with httpversion=%d, we want a version less than h3",
-             conn->connection_id, httpversion));
-      return FALSE;
+  if((needle->handler->protocol & PROTO_FAMILY_HTTP)) {
+    switch(Curl_conn_http_version(data, conn)) {
+    case 30:
+      if(!(data->state.http_neg.allowed & CURL_HTTP_V3x)) {
+        DEBUGF(infof(data, "not reusing conn #%" CURL_FORMAT_CURL_OFF_T
+               ", we do not want h3", conn->connection_id));
+        return FALSE;
+      }
+      break;
+    case 20:
+      if(!(data->state.http_neg.allowed & CURL_HTTP_V2x)) {
+        DEBUGF(infof(data, "not reusing conn #%" CURL_FORMAT_CURL_OFF_T
+               ", we do not want h2", conn->connection_id));
+        return FALSE;
+      }
+      break;
+    default:
+      if(!(data->state.http_neg.allowed & CURL_HTTP_V1x)) {
+        DEBUGF(infof(data, "not reusing conn #%" CURL_FORMAT_CURL_OFF_T
+               ", we do not want h1", conn->connection_id));
+        return FALSE;
+      }
+      break;
     }
   }
+#endif
+
 #ifdef USE_SSH
   else if(get_protocol_family(needle->handler) & PROTO_FAMILY_SSH) {
     if(!ssh_config_matches(needle, conn))
@@ -1682,9 +1697,9 @@ static void zonefrom_url(CURLU *uh, struct Curl_easy *data,
 #endif
 
   if(!uc && zoneid) {
-    char *endp;
-    unsigned long scope = strtoul(zoneid, &endp, 10);
-    if(!*endp && (scope < UINT_MAX))
+    const char *p = zoneid;
+    curl_off_t scope;
+    if(!Curl_str_number(&p, &scope, UINT_MAX))
       /* A plain number, use it directly as a scope id. */
       conn->scope_id = (unsigned int)scope;
 #if defined(HAVE_IF_NAMETOINDEX)
@@ -1921,10 +1936,17 @@ static CURLcode parseurlandfillconn(struct Curl_easy *data,
       return CURLE_OUT_OF_MEMORY;
   }
   else {
-    unsigned long port = strtoul(data->state.up.port, NULL, 10);
-    conn->primary.remote_port = conn->remote_port =
-      (data->set.use_port && data->state.allow_port) ?
-      data->set.use_port : curlx_ultous(port);
+    curl_off_t port;
+    bool valid = TRUE;
+    if(data->set.use_port && data->state.allow_port)
+      port = data->set.use_port;
+    else {
+      const char *p = data->state.up.port;
+      if(Curl_str_number(&p, &port, 0xffff))
+        valid = FALSE;
+    }
+    if(valid)
+      conn->primary.remote_port = conn->remote_port = (unsigned short)port;
   }
 
   (void)curl_url_get(uh, CURLUPART_QUERY, &data->state.up.query, 0);
@@ -2253,7 +2275,10 @@ static CURLcode parse_proxy(struct Curl_easy *data,
   (void)curl_url_get(uhp, CURLUPART_PORT, &portptr, 0);
 
   if(portptr) {
-    port = (int)strtol(portptr, NULL, 10);
+    curl_off_t num;
+    const char *p = portptr;
+    if(!Curl_str_number(&p, &num, 0xffff))
+      port = (int)num;
     free(portptr);
   }
   else {
@@ -2891,19 +2916,18 @@ static CURLcode parse_connect_to_host_port(struct Curl_easy *data,
   /* Get port number off server.com:1080 */
   host_portno = strchr(portptr, ':');
   if(host_portno) {
-    char *endp = NULL;
     *host_portno = '\0'; /* cut off number from hostname */
     host_portno++;
     if(*host_portno) {
-      long portparse = strtol(host_portno, &endp, 10);
-      if((endp && *endp) || (portparse < 0) || (portparse > 65535)) {
+      curl_off_t portparse;
+      const char *p = host_portno;
+      if(Curl_str_number(&p, &portparse, 0xffff)) {
         failf(data, "No valid port number in connect to host string (%s)",
               host_portno);
         result = CURLE_SETOPT_OPTION_SYNTAX;
         goto error;
       }
-      else
-        port = (int)portparse; /* we know it will fit */
+      port = (int)portparse; /* we know it will fit */
     }
   }
 
@@ -2974,12 +2998,11 @@ static CURLcode parse_connect_to_string(struct Curl_easy *data,
       /* check whether the URL's port matches */
       char *ptr_next = strchr(ptr, ':');
       if(ptr_next) {
-        char *endp = NULL;
-        long port_to_match = strtol(ptr, &endp, 10);
-        if((endp == ptr_next) && (port_to_match == conn->remote_port)) {
+        curl_off_t port_to_match;
+        if(!Curl_str_number(&ptr, &port_to_match, 0xffff) &&
+           (port_to_match == (curl_off_t)conn->remote_port))
           port_match = TRUE;
-          ptr = ptr_next + 1;
-        }
+        ptr = ptr_next + 1;
       }
     }
   }
@@ -3049,75 +3072,47 @@ static CURLcode parse_connect_to_slist(struct Curl_easy *data,
        )) {
     /* no connect_to match, try alt-svc! */
     enum alpnid srcalpnid = ALPN_none;
-    bool use_alt_svc = FALSE;
     bool hit = FALSE;
     struct altsvc *as = NULL;
-    const int allowed_versions = ( ALPN_h1
-#ifdef USE_HTTP2
-                                   | ALPN_h2
-#endif
-#ifdef USE_HTTP3
-                                   | ALPN_h3
-#endif
-      ) & data->asi->flags;
-    static enum alpnid alpn_ids[] = {
-#ifdef USE_HTTP3
-      ALPN_h3,
-#endif
-#ifdef USE_HTTP2
-      ALPN_h2,
-#endif
-      ALPN_h1,
-    };
-    size_t i;
+    int allowed_versions = ALPN_none;
 
-    switch(data->state.httpwant) {
-    case CURL_HTTP_VERSION_1_0:
-      break;
-    case CURL_HTTP_VERSION_1_1:
-      use_alt_svc = TRUE;
-      srcalpnid = ALPN_h1; /* only regard alt-svc advice for http/1.1 */
-      break;
-    case CURL_HTTP_VERSION_2_0:
-      use_alt_svc = TRUE;
-      srcalpnid = ALPN_h2; /* only regard alt-svc advice for h2 */
-      break;
-    case CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE:
-      break;
-    case CURL_HTTP_VERSION_3:
-      use_alt_svc = TRUE;
-      srcalpnid = ALPN_h3; /* only regard alt-svc advice for h3 */
-      break;
-    case CURL_HTTP_VERSION_3ONLY:
-      break;
-    default: /* no specific HTTP version wanted, look at all of alt-svc */
-      use_alt_svc = TRUE;
-      srcalpnid = ALPN_none;
-      break;
-    }
-    if(!use_alt_svc)
-      return CURLE_OK;
+    if(data->state.http_neg.allowed & CURL_HTTP_V3x)
+      allowed_versions |= ALPN_h3;
+    if(data->state.http_neg.allowed & CURL_HTTP_V2x)
+      allowed_versions |= ALPN_h2;
+    if(data->state.http_neg.allowed & CURL_HTTP_V1x)
+      allowed_versions |= ALPN_h1;
+    allowed_versions &= (int)data->asi->flags;
 
     host = conn->host.rawalloc;
     DEBUGF(infof(data, "check Alt-Svc for host %s", host));
-    if(srcalpnid == ALPN_none) {
-      /* scan all alt-svc protocol ids in order or relevance */
-      for(i = 0; !hit && (i < CURL_ARRAYSIZE(alpn_ids)); ++i) {
-        srcalpnid = alpn_ids[i];
-        hit = Curl_altsvc_lookup(data->asi,
-                                 srcalpnid, host, conn->remote_port, /* from */
-                                 &as /* to */,
-                                 allowed_versions);
-      }
-    }
-    else {
-      /* look for a specific alt-svc protocol id */
+#ifdef USE_HTTP3
+    if(!hit && (allowed_versions & ALPN_h3)) {
+      srcalpnid = ALPN_h3;
       hit = Curl_altsvc_lookup(data->asi,
-                               srcalpnid, host, conn->remote_port, /* from */
+                               ALPN_h3, host, conn->remote_port, /* from */
                                &as /* to */,
                                allowed_versions);
     }
-
+ #endif
+ #ifdef USE_HTTP2
+    if(!hit && (allowed_versions & ALPN_h2) &&
+       !data->state.http_neg.h2_prior_knowledge) {
+      srcalpnid = ALPN_h2;
+      hit = Curl_altsvc_lookup(data->asi,
+                               ALPN_h2, host, conn->remote_port, /* from */
+                               &as /* to */,
+                               allowed_versions);
+    }
+ #endif
+    if(!hit && (allowed_versions & ALPN_h1) &&
+       !data->state.http_neg.only_10) {
+      srcalpnid = ALPN_h1;
+      hit = Curl_altsvc_lookup(data->asi,
+                               ALPN_h1, host, conn->remote_port, /* from */
+                               &as /* to */,
+                               allowed_versions);
+    }
 
     if(hit) {
       char *hostd = strdup((char *)as->dst.host);
@@ -3136,14 +3131,15 @@ static CURLcode parse_connect_to_slist(struct Curl_easy *data,
         /* protocol version switch */
         switch(as->dst.alpnid) {
         case ALPN_h1:
-          data->state.httpwant = CURL_HTTP_VERSION_1_1;
+          data->state.http_neg.allowed = CURL_HTTP_V1x;
+          data->state.http_neg.only_10 = FALSE;
           break;
         case ALPN_h2:
-          data->state.httpwant = CURL_HTTP_VERSION_2_0;
+          data->state.http_neg.allowed = CURL_HTTP_V2x;
           break;
         case ALPN_h3:
           conn->transport = TRNSPRT_QUIC;
-          data->state.httpwant = CURL_HTTP_VERSION_3;
+          data->state.http_neg.allowed = CURL_HTTP_V3x;
           break;
         default: /* should not be possible */
           break;

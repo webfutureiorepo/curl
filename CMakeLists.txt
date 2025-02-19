@@ -32,8 +32,8 @@
 # https://cmake.org/cmake/help/latest/module/FetchContent.html#integrating-with-find-package
 #
 # The following variables are available:
-#   HAVE_SSL_SET0_WBIO: `SSL_set0_wbio` present in OpenSSL/wolfSSL
-#   HAVE_OPENSSL_SRP: `SSL_CTX_set_srp_username` present in OpenSSL/wolfSSL
+#   HAVE_SSL_SET0_WBIO: `SSL_set0_wbio` present in OpenSSL
+#   HAVE_OPENSSL_SRP: `SSL_CTX_set_srp_username` present in OpenSSL
 #   HAVE_GNUTLS_SRP: `gnutls_srp_verifier` present in GnuTLS
 #   HAVE_SSL_SET_QUIC_USE_LEGACY_CODEPOINT: `SSL_set_quic_use_legacy_codepoint` present in OpenSSL/wolfSSL
 #   HAVE_QUICHE_CONN_SET_QLOG_FD: `quiche_conn_set_qlog_fd` present in quiche
@@ -202,9 +202,9 @@ if(WIN32)
     set(ENABLE_UNICODE ON)
   endif()
   if(ENABLE_UNICODE)
-    add_definitions("-DUNICODE" "-D_UNICODE")
+    set_property(DIRECTORY APPEND PROPERTY COMPILE_DEFINITIONS "UNICODE" "_UNICODE")
     if(MINGW)
-      add_compile_options("-municode")
+      set_property(DIRECTORY APPEND PROPERTY COMPILE_OPTIONS "-municode")
     endif()
   endif()
 
@@ -216,7 +216,7 @@ if(WIN32)
 
   set(CURL_TARGET_WINDOWS_VERSION "" CACHE STRING "Minimum target Windows version as hex string")
   if(CURL_TARGET_WINDOWS_VERSION)
-    add_definitions("-D_WIN32_WINNT=${CURL_TARGET_WINDOWS_VERSION}")
+    set_property(DIRECTORY APPEND PROPERTY COMPILE_DEFINITIONS "_WIN32_WINNT=${CURL_TARGET_WINDOWS_VERSION}")
     list(APPEND CMAKE_REQUIRED_DEFINITIONS "-D_WIN32_WINNT=${CURL_TARGET_WINDOWS_VERSION}")  # Apply to all feature checks
   endif()
 
@@ -265,7 +265,7 @@ endif()
 
 option(ENABLE_DEBUG "Enable curl debug features (for developing curl itself)" OFF)
 if(ENABLE_DEBUG)
-  message(WARNING "This curl build is Debug-enabled, do not use in production.")
+  message(WARNING "This curl build is Debug-enabled and insecure, do not use in production.")
 endif()
 option(ENABLE_CURLDEBUG "Enable TrackMemory debug feature" ${ENABLE_DEBUG})
 
@@ -511,14 +511,9 @@ if(ENABLE_CURL_MANUAL OR BUILD_LIBCURL_DOCS)
   endif()
 endif()
 
-# Disable warnings on Borland to avoid changing 3rd party code.
-if(BORLAND)
-  string(APPEND CMAKE_C_FLAGS " -w-")
-endif()
-
 # If we are on AIX, do the _ALL_SOURCE magic
 if(CMAKE_SYSTEM_NAME STREQUAL "AIX")
-  add_definitions("-D_ALL_SOURCE")
+  set_property(DIRECTORY APPEND PROPERTY COMPILE_DEFINITIONS "_ALL_SOURCE")
 endif()
 
 # If we are on Haiku, make sure that the network library is brought in.
@@ -539,15 +534,21 @@ include(CheckSymbolExists)
 include(CheckTypeSize)
 include(CheckCSourceCompiles)
 
-option(_CURL_QUICK_DETECT "Fast-track known feature detection results (Windows, some Apple)" ON)
-if(_CURL_QUICK_DETECT)
+option(_CURL_PREFILL "Fast-track known feature detection results (Windows, some Apple)" "${WIN32}")
+if(_CURL_PREFILL)
   if(WIN32)
     include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/win32-cache.cmake")
-  elseif(APPLE)
-    set(HAVE_EVENTFD 0)
-    set(HAVE_GETPASS_R 0)
-    set(HAVE_SENDMMSG 0)
+  elseif(UNIX)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/unix-cache.cmake")
+    message(STATUS "Pre-filling feature detection results for UNIX")
   endif()
+elseif(WIN32)
+  message(STATUS "Pre-filling feature detection results disabled.")
+elseif(APPLE)
+  set(HAVE_EVENTFD 0)
+  set(HAVE_GETPASS_R 0)
+  set(HAVE_WRITABLE_ARGV 1)
+  set(HAVE_SENDMMSG 0)
 endif()
 
 if(AMIGA)
@@ -604,8 +605,8 @@ if(ENABLE_IPV6)
   if(WIN32)
     check_struct_has_member("struct sockaddr_in6" "sin6_scope_id" "winsock2.h;ws2tcpip.h" HAVE_SOCKADDR_IN6_SIN6_SCOPE_ID)
   else()
-    check_struct_has_member("struct sockaddr_in6" "sin6_addr" "netinet/in.h" HAVE_SOCKADDR_IN6_SIN6_ADDR)
     check_struct_has_member("struct sockaddr_in6" "sin6_scope_id" "netinet/in.h" HAVE_SOCKADDR_IN6_SIN6_SCOPE_ID)
+    check_struct_has_member("struct sockaddr_in6" "sin6_addr" "netinet/in.h" HAVE_SOCKADDR_IN6_SIN6_ADDR)
     if(NOT HAVE_SOCKADDR_IN6_SIN6_ADDR)
       if(NOT DOS AND NOT AMIGA)
         message(WARNING "struct sockaddr_in6 not available, disabling IPv6 support")
@@ -688,7 +689,7 @@ endif()
 if(CURL_USE_SCHANNEL)
   set(_ssl_enabled ON)
   set(USE_SCHANNEL ON)  # Windows native SSL/TLS support
-  set(USE_WINDOWS_SSPI ON)  # CURL_USE_SCHANNEL implies CURL_WINDOWS_SSPI
+  set(USE_WINDOWS_SSPI ON)  # CURL_USE_SCHANNEL requires CURL_WINDOWS_SSPI
 
   if(CURL_DEFAULT_SSL_BACKEND AND CURL_DEFAULT_SSL_BACKEND STREQUAL "schannel")
     set(_valid_default_ssl_backend TRUE)
@@ -903,7 +904,7 @@ if(CURL_DEFAULT_SSL_BACKEND AND NOT _valid_default_ssl_backend)
 endif()
 
 # Keep ZLIB detection after TLS detection,
-# and before calling curl_openssl_check_symbol_exists().
+# and before calling curl_openssl_check_exists().
 
 set(HAVE_LIBZ OFF)
 curl_dependency_option(CURL_ZLIB ZLIB "ZLIB")
@@ -947,8 +948,8 @@ if(ZSTD_FOUND)
   endif()
 endif()
 
-# Check symbol in an OpenSSL-like TLS backend.
-macro(curl_openssl_check_symbol_exists _symbol _files _variable)
+# Check function in an OpenSSL-like TLS backend.
+macro(curl_openssl_check_exists)
   cmake_push_check_state()
   if(USE_OPENSSL)
     list(APPEND CMAKE_REQUIRED_LIBRARIES OpenSSL::SSL OpenSSL::Crypto)
@@ -973,7 +974,11 @@ macro(curl_openssl_check_symbol_exists _symbol _files _variable)
     endif()
     list(APPEND CMAKE_REQUIRED_DEFINITIONS "-DHAVE_UINTPTR_T")  # to pull in stdint.h (as of wolfSSL v5.5.4)
   endif()
-  check_symbol_exists("${_symbol}" "${_files}" "${_variable}")
+  if(${ARGC} EQUAL 2)
+    check_function_exists(${ARGN})
+  else()
+    check_symbol_exists(${ARGN})  # Uses CMAKE_REQUIRED_INCLUDES and CMAKE_REQUIRED_DEFINITIONS
+  endif()
   cmake_pop_check_state()
 endmacro()
 
@@ -981,11 +986,10 @@ endmacro()
 macro(curl_openssl_check_quic)
   if(NOT DEFINED HAVE_SSL_SET_QUIC_USE_LEGACY_CODEPOINT)
     if(USE_OPENSSL)
-      curl_openssl_check_symbol_exists("SSL_set_quic_use_legacy_codepoint" "openssl/ssl.h" HAVE_SSL_SET_QUIC_USE_LEGACY_CODEPOINT)
+      curl_openssl_check_exists("SSL_set_quic_use_legacy_codepoint" HAVE_SSL_SET_QUIC_USE_LEGACY_CODEPOINT)
     endif()
     if(USE_WOLFSSL)
-      curl_openssl_check_symbol_exists("wolfSSL_set_quic_use_legacy_codepoint" "wolfssl/options.h;wolfssl/openssl/ssl.h"
-        HAVE_SSL_SET_QUIC_USE_LEGACY_CODEPOINT)
+      curl_openssl_check_exists("wolfSSL_set_quic_use_legacy_codepoint" HAVE_SSL_SET_QUIC_USE_LEGACY_CODEPOINT)
     endif()
   endif()
   if(NOT HAVE_SSL_SET_QUIC_USE_LEGACY_CODEPOINT)
@@ -994,17 +998,17 @@ macro(curl_openssl_check_quic)
 endmacro()
 
 if(USE_WOLFSSL)
-  curl_openssl_check_symbol_exists("wolfSSL_DES_ecb_encrypt" "wolfssl/options.h;wolfssl/openssl/des.h" HAVE_WOLFSSL_DES_ECB_ENCRYPT)
-  curl_openssl_check_symbol_exists("wolfSSL_BIO_new" "wolfssl/options.h;wolfssl/ssl.h" HAVE_WOLFSSL_BIO)
-  curl_openssl_check_symbol_exists("wolfSSL_BIO_set_shutdown" "wolfssl/options.h;wolfssl/ssl.h" HAVE_WOLFSSL_FULL_BIO)
+  curl_openssl_check_exists("wolfSSL_DES_ecb_encrypt" HAVE_WOLFSSL_DES_ECB_ENCRYPT)
+  curl_openssl_check_exists("wolfSSL_BIO_new" HAVE_WOLFSSL_BIO)
+  curl_openssl_check_exists("wolfSSL_BIO_set_shutdown" HAVE_WOLFSSL_FULL_BIO)
 endif()
 
-if(USE_OPENSSL OR USE_WOLFSSL)
+if(USE_OPENSSL)
   if(NOT DEFINED HAVE_SSL_SET0_WBIO)
-    curl_openssl_check_symbol_exists("SSL_set0_wbio" "openssl/ssl.h" HAVE_SSL_SET0_WBIO)
+    curl_openssl_check_exists("SSL_set0_wbio" HAVE_SSL_SET0_WBIO)
   endif()
   if(NOT DEFINED HAVE_OPENSSL_SRP AND NOT CURL_DISABLE_SRP)
-    curl_openssl_check_symbol_exists("SSL_CTX_set_srp_username" "openssl/ssl.h" HAVE_OPENSSL_SRP)
+    curl_openssl_check_exists("SSL_CTX_set_srp_username" "openssl/ssl.h" HAVE_OPENSSL_SRP)
   endif()
 endif()
 
@@ -1014,13 +1018,10 @@ if(USE_ECH)
   if(USE_OPENSSL OR USE_WOLFSSL)
     # Be sure that the TLS library actually supports ECH.
     if(USE_WOLFSSL)
-      curl_openssl_check_symbol_exists("wolfSSL_CTX_GenerateEchConfig" "wolfssl/options.h;wolfssl/ssl.h"
-        HAVE_WOLFSSL_CTX_GENERATEECHCONFIG)
+      curl_openssl_check_exists("wolfSSL_CTX_GenerateEchConfig" HAVE_WOLFSSL_CTX_GENERATEECHCONFIG)
     endif()
-    if(HAVE_BORINGSSL OR HAVE_AWSLC)
-      curl_openssl_check_symbol_exists("SSL_set1_ech_config_list" "openssl/ssl.h" HAVE_SSL_SET1_ECH_CONFIG_LIST)
-    elseif(HAVE_OPENSSL)
-      curl_openssl_check_symbol_exists("SSL_set1_ech_config_list" "openssl/ech.h" HAVE_SSL_SET1_ECH_CONFIG_LIST)
+    if(USE_OPENSSL)
+      curl_openssl_check_exists("SSL_set1_ech_config_list" HAVE_SSL_SET1_ECH_CONFIG_LIST)
     endif()
     if(HAVE_WOLFSSL_CTX_GENERATEECHCONFIG OR
        HAVE_SSL_SET1_ECH_CONFIG_LIST)
@@ -1706,7 +1707,6 @@ check_function_exists("sendmsg"       HAVE_SENDMSG)
 check_function_exists("sendmmsg"      HAVE_SENDMMSG)
 check_symbol_exists("select"          "${CURL_INCLUDES}" HAVE_SELECT)  # proto/bsdsocket.h sys/select.h sys/socket.h
 check_symbol_exists("strdup"          "string.h" HAVE_STRDUP)
-check_symbol_exists("strtok_r"        "string.h" HAVE_STRTOK_R)
 check_symbol_exists("memrchr"         "string.h" HAVE_MEMRCHR)
 check_symbol_exists("alarm"           "unistd.h" HAVE_ALARM)
 check_symbol_exists("fcntl"           "fcntl.h" HAVE_FCNTL)
@@ -1727,7 +1727,6 @@ check_symbol_exists("gethostbyname_r" "netdb.h" HAVE_GETHOSTBYNAME_R)
 check_symbol_exists("gethostname"     "${CURL_INCLUDES}" HAVE_GETHOSTNAME)  # winsock2.h unistd.h proto/bsdsocket.h
 
 check_symbol_exists("signal"          "signal.h" HAVE_SIGNAL)
-check_symbol_exists("strtoll"         "stdlib.h" HAVE_STRTOLL)
 check_symbol_exists("strerror_r"      "stdlib.h;string.h" HAVE_STRERROR_R)
 check_symbol_exists("sigaction"       "signal.h" HAVE_SIGACTION)
 check_symbol_exists("siginterrupt"    "signal.h" HAVE_SIGINTERRUPT)
@@ -1807,16 +1806,43 @@ foreach(_curl_test IN ITEMS
     HAVE_GETHOSTBYNAME_R_3
     HAVE_GETHOSTBYNAME_R_5
     HAVE_GETHOSTBYNAME_R_6
-    HAVE_GETHOSTBYNAME_R_3_REENTRANT
-    HAVE_GETHOSTBYNAME_R_5_REENTRANT
-    HAVE_GETHOSTBYNAME_R_6_REENTRANT
     HAVE_BOOL_T
     STDC_HEADERS
-    HAVE_FILE_OFFSET_BITS
     HAVE_ATOMIC
     )
   curl_internal_test(${_curl_test})
 endforeach()
+
+# Check for reentrant
+cmake_push_check_state()
+list(APPEND CMAKE_REQUIRED_DEFINITIONS "-D_REENTRANT")
+foreach(_curl_test IN ITEMS
+    HAVE_GETHOSTBYNAME_R_3
+    HAVE_GETHOSTBYNAME_R_5
+    HAVE_GETHOSTBYNAME_R_6)
+  curl_internal_test(${_curl_test}_REENTRANT)
+  if(NOT ${_curl_test} AND ${_curl_test}_REENTRANT)
+    set(NEED_REENTRANT 1)
+  endif()
+endforeach()
+cmake_pop_check_state()
+
+if(NEED_REENTRANT)
+  foreach(_curl_test IN ITEMS
+      HAVE_GETHOSTBYNAME_R_3
+      HAVE_GETHOSTBYNAME_R_5
+      HAVE_GETHOSTBYNAME_R_6)
+    set(${_curl_test} 0)
+    if(${_curl_test}_REENTRANT)
+      set(${_curl_test} 1)
+    endif()
+  endforeach()
+endif()
+
+cmake_push_check_state()
+list(APPEND CMAKE_REQUIRED_DEFINITIONS "-D_FILE_OFFSET_BITS=64")
+curl_internal_test(HAVE_FILE_OFFSET_BITS)
+cmake_pop_check_state()
 
 cmake_push_check_state()
 if(HAVE_FILE_OFFSET_BITS)
@@ -1871,30 +1897,6 @@ endif()
 curl_internal_test(HAVE_GLIBC_STRERROR_R)
 curl_internal_test(HAVE_POSIX_STRERROR_R)
 
-# Check for reentrant
-foreach(_curl_test IN ITEMS
-    HAVE_GETHOSTBYNAME_R_3
-    HAVE_GETHOSTBYNAME_R_5
-    HAVE_GETHOSTBYNAME_R_6)
-  if(NOT ${_curl_test})
-    if(${_curl_test}_REENTRANT)
-      set(NEED_REENTRANT 1)
-    endif()
-  endif()
-endforeach()
-
-if(NEED_REENTRANT)
-  foreach(_curl_test IN ITEMS
-      HAVE_GETHOSTBYNAME_R_3
-      HAVE_GETHOSTBYNAME_R_5
-      HAVE_GETHOSTBYNAME_R_6)
-    set(${_curl_test} 0)
-    if(${_curl_test}_REENTRANT)
-      set(${_curl_test} 1)
-    endif()
-  endforeach()
-endif()
-
 if(NOT WIN32)
   curl_internal_test(HAVE_CLOCK_GETTIME_MONOTONIC)  # Check clock_gettime(CLOCK_MONOTONIC, x) support
 endif()
@@ -1928,7 +1930,7 @@ endif()
 
 include(CMake/OtherTests.cmake)
 
-add_definitions("-DHAVE_CONFIG_H")
+set_property(DIRECTORY APPEND PROPERTY COMPILE_DEFINITIONS "HAVE_CONFIG_H")
 
 if(WIN32)
   list(APPEND CURL_LIBS "ws2_32" "bcrypt")
@@ -1955,12 +1957,6 @@ endif()
 if(MSVC)
   # Disable default manifest added by CMake
   string(APPEND CMAKE_EXE_LINKER_FLAGS " -MANIFEST:NO")
-
-  if(CMAKE_C_FLAGS MATCHES "[/-]W[0-4]")
-    string(REGEX REPLACE "[/-]W[0-4]" "-W4" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
-  else()
-    string(APPEND CMAKE_C_FLAGS " -W4")
-  endif()
 
   # Use multithreaded compilation on VS2008+
   if(CMAKE_C_COMPILER_ID STREQUAL "MSVC" AND MSVC_VERSION GREATER_EQUAL 1500)
@@ -2138,7 +2134,7 @@ curl_add_if("SPNEGO"        NOT CURL_DISABLE_NEGOTIATE_AUTH AND
                             (HAVE_GSSAPI OR USE_WINDOWS_SSPI))
 curl_add_if("Kerberos"      NOT CURL_DISABLE_KERBEROS_AUTH AND
                             (HAVE_GSSAPI OR USE_WINDOWS_SSPI))
-curl_add_if("NTLM"          NOT (CURL_DISABLE_NTLM) AND
+curl_add_if("NTLM"          NOT CURL_DISABLE_NTLM AND
                             (_use_curl_ntlm_core OR USE_WINDOWS_SSPI))
 curl_add_if("TLS-SRP"       USE_TLS_SRP)
 curl_add_if("HTTP2"         USE_NGHTTP2)
